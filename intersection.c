@@ -30,6 +30,14 @@ static Arrival curr_arrivals[4][3][20];
 static sem_t semaphores[4][3];
 
 /*
+ * mutexes[]
+ * 
+ * An array of mutexes that are used to lock the intersection
+ * The mutexes are used to ensure that only one car can be in the intersection at a time
+ */
+static pthread_mutex_t mutexes[1] = {PTHREAD_MUTEX_INITIALIZER};
+
+/*
  * lights[]
  *
  * An array of structs that define the traffic lights
@@ -55,7 +63,7 @@ static struct {Side side; Direction direction;} lights[9] =
  */
 static void* supply_arrivals()
 {
-  fprintf(stderr, "Arrival thread started\n");
+  fprintf(stderr, "(Supplier):\t Started\n");
   int t = 0;
   int num_curr_arrivals[4][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 
@@ -64,6 +72,7 @@ static void* supply_arrivals()
   {
     // get the next arrival in the list
     Arrival arrival = input_arrivals[i];
+    fprintf(stderr, "(Supplier):\t Next arrival (%d): %d / %d @ t%d\n", arrival.id, arrival.side, arrival.direction, arrival.time);
     // wait until this arrival is supposed to arrive
     sleep(arrival.time - t);
     t = arrival.time;
@@ -107,7 +116,6 @@ static void* print_traffic_light_change(Side side, Direction direction, bool gre
  */
 static bool all_cars_handled()
 {
-  bool all_handled = true;
   for (int i = 0; i < 4; i++)
   {
     for (int j = 0; j < 3; j++)
@@ -116,11 +124,11 @@ static bool all_cars_handled()
       sem_getvalue(&semaphores[i][j], &sem_value);
       if (sem_value > 0)
       {
-        all_handled = false;
+        return false;
       }
     }
   }
-  return all_handled;
+  return true;
 }
 
 /*
@@ -130,18 +138,18 @@ static bool all_cars_handled()
  * As argument receives the index of the traffic light in the lights array
  * While not all arrivals have been handled, repeatedly:
  * - waits for an arrival using the semaphore for this traffic light
- * - locks the right mutex(es)
+ * - locks the mutex(es)
  * - makes the traffic light turn green
  * - sleeps for CROSS_TIME seconds
  * - makes the traffic light turn red
- * - unlocks the right mutex(es)
+ * - unlocks the mutex(es)
  */
 static void* manage_light(void* arg)
 {
   int light_index = (int)arg;
   Side side = lights[light_index].side;
   Direction direction = lights[light_index].direction;
-  fprintf(stderr, "Light %d / %d started\n", side, direction);
+  fprintf(stderr, "(Light %d / %d):\t Started\n", side, direction);
 
   // keep track of how many cars have passed
   int cars_passed = 0;
@@ -151,17 +159,31 @@ static void* manage_light(void* arg)
   {
     // wait for an arrival
     sem_wait(&semaphores[side][direction]);
-    // lock the right mutex(es)
-    // TODO
+
+    fprintf(stderr, "(Light %d / %d):\t Car %d arrived\n", side, direction, curr_arrivals[side][direction][cars_passed].id);
+
+    // lock the mutex(es)
+    pthread_mutex_lock(&mutexes[0]);
+
     // make the traffic light turn green
     print_traffic_light_change(side, direction, true, get_time_passed(), curr_arrivals[side][direction][cars_passed].id);
+
+    fprintf(stderr, "(Light %d / %d):\t Car %d entering intersection\n", side, direction, curr_arrivals[side][direction][cars_passed].id);
+
+    // +1 car
     cars_passed += 1;
-    // sleep for CROSS_TIME seconds
+
+    fprintf(stderr, "(Light %d / %d):\t Car %d passed\n", side, direction, curr_arrivals[side][direction][cars_passed].id);
+
+    // sleep for CROSS_TIME seconds while the car passes
     sleep(CROSS_TIME);
+
     // make the traffic light turn red
     print_traffic_light_change(side, direction, false, get_time_passed(), 0); 
-    // unlock the right mutex(es)
-    // TODO
+
+    // unlock the mutex(es)
+    pthread_mutex_unlock(&mutexes[0]);
+    
   }
 
   return(0);
@@ -181,44 +203,43 @@ int main(int argc, char * argv[])
 
   // create a thread per traffic light that executes manage_light
   pthread_t light_threads[8];
-  fprintf(stderr, "Creating traffic light threads...\n");
+  fprintf(stderr, "(Controller):\t Creating traffic light threads...\n");
   for (int i = 0; i < sizeof(lights)/sizeof(lights[0]); i++)
   {
-    fprintf(stderr, "Light %d / %d created\n", i, lights[i].side, lights[i].direction);
     pthread_create(&light_threads[i], NULL, manage_light, (void*)i);
   }
-  fprintf(stderr, "Traffic light threads created\n");
+  fprintf(stderr, "(Controller):\t Traffic light threads created\n");
 
   // start the timer
-  fprintf(stderr, "Starting timer...\n");
+  fprintf(stderr, "(Controller):\t Starting timer...\n");
   start_time();
-  fprintf(stderr, "Timer started\n");
+  fprintf(stderr, "(Controller):\t Timer started\n");
 
   // create a thread that executes supply_arrivals
   pthread_t arrival_thread;
-  fprintf(stderr, "Creating arrival thread...\n");
+  fprintf(stderr, "(Controller):\t Creating arrival thread...\n");
   pthread_create(&arrival_thread, NULL, supply_arrivals, NULL);
-  fprintf(stderr, "Arrival thread created\n");
+  fprintf(stderr, "(Controller):\t Arrival thread created\n");
 
   // wait for all arrivals to finish
-  fprintf(stderr, "Waiting for threads to finish...\n");
+  fprintf(stderr, "(Controller):\t Waiting for threads to finish...\n");
   pthread_join(arrival_thread, NULL);
-  fprintf(stderr, "Arrival thread finished\n");
+  fprintf(stderr, "(Controller):\t Arrival thread finished\n");
 
   // wait for all cars to be handled
   while (!all_cars_handled())
   {
     sleep(1);
   }
-  fprintf(stderr, "All cars handled\n");
+  fprintf(stderr, "(Controller):\t All cars handled\n");
 
   // kill all traffic light threads
-  fprintf(stderr, "Killing traffic light threads...\n");
+  fprintf(stderr, "(Controller):\t Killing traffic light threads...\n");
   for (int i = 0; i < sizeof(lights)/sizeof(lights[0]); i++)
   {
     pthread_cancel(light_threads[i]);
   }
-  fprintf(stderr, "Traffic light threads killed\n");
+  fprintf(stderr, "(Controller):\t Traffic light threads killed\n");
 
   // destroy semaphores
   for (int i = 0; i < 4; i++)
