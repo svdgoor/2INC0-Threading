@@ -1,0 +1,16 @@
+# .gitignore
+# General
+.vagrant/
+.vscode/
+
+practice/
+
+# Log files
+# *.log
+router_dealer
+
+client
+
+worker_s1
+
+worker_s2
