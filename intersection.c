@@ -133,17 +133,37 @@ static bool all_cars_handled()
       sem_getvalue(&semaphores[i][j], &sem_value);
       if (sem_value > 0)
       {
+        fprintf(stderr, "(Controller):\t Semaphore %d:%d has value %d\n", i, j, sem_value);
         return false;
       }
     }
   }
+  fprintf(stderr, "(Controller):\t All semaphores empty\n");
+  pthread_mutex_lock(&mutex_lock);
+  fprintf(stderr, "(Controller):\t Section change lock locked\n");
   for (int i = 0; i < sizeof(mutexes)/sizeof(mutexes[0]); i++)
   {
-    if (pthread_mutex_trylock(&mutexes[i]) != 0)
+    // Try locking, but if they are already locked, unlock the other ones
+    int result = pthread_mutex_trylock(&mutexes[i]);
+    if (result == 0)
     {
+      pthread_mutex_unlock(&mutexes[i]);
+    }
+    else if (result == EBUSY)
+    {
+      fprintf(stderr, "(Controller):\t Mutex %d is locked\n", i + 1);
+      pthread_mutex_unlock(&mutex_lock);
+      return false;
+    }
+    else
+    {
+      fprintf(stderr, "(Controller):\t Error checking mutexes: %d\n", result);
+      pthread_mutex_unlock(&mutex_lock);
       return false;
     }
   }
+  fprintf(stderr, "(Controller):\t All mutexes unlocked\n");
+  pthread_mutex_unlock(&mutex_lock);
   return true;
 }
 
@@ -188,42 +208,58 @@ static void* manage_light(void* arg)
     fprintf(stderr, "(Light %d / %d):\t Section change lock locked\n", side, direction);
     
     // for each path_mutex check whether it is locked
-    bool all_unlocked = true;
-    if (m1 != 0)
-    {
-      if (pthread_mutex_trylock(&mutexes[m1]) != 0)
-      {
-        all_unlocked = false;
-      }
-    }
-    fprintf(stderr, "(Light %d / %d):\t 1/4 unlocked: %d\n", side, direction, all_unlocked);
-    if (m2 != 0)
-    {
-      if (pthread_mutex_trylock(&mutexes[m2]) != 0)
-      {
-        all_unlocked = false;
-      }
-    }
-    fprintf(stderr, "(Light %d / %d):\t 2/4 unlocked: %d\n", side, direction, all_unlocked);
-    if (m3 != 0)
-    {
-      if (pthread_mutex_trylock(&mutexes[m3]) != 0)
-      {
-        all_unlocked = false;
-      }
-    }
-    fprintf(stderr, "(Light %d / %d):\t 3/4 unlocked: %d\n", side, direction, all_unlocked);
-    if (m4 != 0)
-    {
-      if (pthread_mutex_trylock(&mutexes[m4]) != 0)
-      {
-        all_unlocked = false;
-      }
-    }
-    fprintf(stderr, "(Light %d / %d):\t 4/4 unlocked: %d\n", side, direction, all_unlocked);
+    int m1r, m2r, m3r, m4r;
 
-    // if all path_mutexes are unlocked, make the light green
-    if (all_unlocked)
+    m1r = m1 == 0 ? -2 : pthread_mutex_trylock(&mutexes[m1-1]);
+    m2r = m2 == 0 ? -2 : pthread_mutex_trylock(&mutexes[m2-1]);
+    m3r = m3 == 0 ? -2 : pthread_mutex_trylock(&mutexes[m3-1]);
+    m4r = m4 == 0 ? -2 : pthread_mutex_trylock(&mutexes[m4-1]);
+
+    // now we have 4 variables containing -2 if they're not relevant, -1 if they cannot be locked (already locked), and 0 if they were locked
+    fprintf(stderr, "(Light %d / %d):\t Path mutexes as follows: %d:%d, %d:%d, %d:%d, %d:%d\n", side, direction, m1, m1r, m2, m2r, m3, m3r, m4, m4r);
+
+    // if all were successfully locked, then all_unlocked is true
+    // otherwise we need to unlock those that were locked successfully and try again later
+
+    bool all_unlocked = true;
+    if (m1r != 0 && m1r != -2)
+    {
+      all_unlocked = false;
+    }
+    if (m2r != 0 && m2r != -2)
+    {
+      all_unlocked = false;
+    }
+    if (m3r != 0 && m3r != -2)
+    {
+      all_unlocked = false;
+    }
+    if (m4r != 0 && m4r != -2)
+    {
+      all_unlocked = false;
+    }
+    if (!all_unlocked)
+    {
+      if (m1 != 0 && m1r == 0)
+      {
+        pthread_mutex_unlock(&mutexes[m1-1]);
+      }
+      if (m2 != 0 && m2r == 0)
+      {
+        pthread_mutex_unlock(&mutexes[m2-1]);
+      }
+      if (m3 != 0 && m3r == 0)
+      {
+        pthread_mutex_unlock(&mutexes[m3-1]);
+      }
+      if (m4 != 0 && m4r == 0)
+      {
+        pthread_mutex_unlock(&mutexes[m4-1]);
+      }
+      // increment the semaphore again so that the light can try again later when the section is unlocked
+      sem_post(&semaphores[side][direction]);
+    }
+    else
     {
       // print the light change
       print_traffic_light_change(side, direction, true, get_time_passed(), curr_arrivals[side][direction][cars_passed].id);
@@ -251,19 +287,19 @@ static void* manage_light(void* arg)
       // unlock the path_mutexes
       if (m1 != 0)
       {
-        pthread_mutex_unlock(&mutexes[m1]);
+        pthread_mutex_unlock(&mutexes[m1-1]);
       }
       if (m2 != 0)
       {
-        pthread_mutex_unlock(&mutexes[m2]);
+        pthread_mutex_unlock(&mutexes[m2-1]);
       }
       if (m3 != 0)
       {
-        pthread_mutex_unlock(&mutexes[m3]);
+        pthread_mutex_unlock(&mutexes[m3-1]);
       }
       if (m4 != 0)
       {
-        pthread_mutex_unlock(&mutexes[m4]);
+        pthread_mutex_unlock(&mutexes[m4-1]);
       }
 
       fprintf(stderr, "(Light %d / %d):\t Path mutexes unlocked\n", side, direction);
@@ -271,14 +307,12 @@ static void* manage_light(void* arg)
       // increment the number of cars passed
       cars_passed += 1;
     }
-    else
-    {
-      // increment the semaphore again so that the light can try again later when the section is unlocked
-      sem_post(&semaphores[side][direction]);
-    }
 
     // unlock the section change lock
     pthread_mutex_unlock(&mutex_lock);
+
+    // sleep for a sec
+    sleep(0.1);
   }
   return(0);
 }
