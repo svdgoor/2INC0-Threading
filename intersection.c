@@ -215,7 +215,7 @@ static void* manage_light(void* arg)
     m3r = m3 == 0 ? -2 : pthread_mutex_trylock(&mutexes[m3-1]);
     m4r = m4 == 0 ? -2 : pthread_mutex_trylock(&mutexes[m4-1]);
 
-    // now we have 4 variables containing -2 if they're not relevant, -1 if they cannot be locked (already locked), and 0 if they were locked
+    // now we have 4 variables containing -2 if they're not relevant, -1 if they cannot be locked (already locked), and 0 if they were unlocked
     fprintf(stderr, "(Light %d / %d):\t Path mutexes as follows: %d:%d, %d:%d, %d:%d, %d:%d\n", side, direction, m1, m1r, m2, m2r, m3, m3r, m4, m4r);
 
     // if all were successfully locked, then all_unlocked is true
