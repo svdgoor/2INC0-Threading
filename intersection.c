@@ -35,24 +35,33 @@ static sem_t semaphores[4][3];
  * An array of mutexes that are used to lock the intersection
  * The mutexes are used to ensure that only one car can be in the intersection at a time
  */
-static pthread_mutex_t mutexes[1] = {PTHREAD_MUTEX_INITIALIZER};
+static pthread_mutex_t mutexes[9];
+
+/*
+ * mutex lock
+ *
+ * A mutex that is locked when a light is claiming certain parts of the intersection
+ * This is used to ensure that only one light can claim mutexes at the same time,
+ * to prevent deadlocks
+ */
+static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
  * lights[]
  *
  * An array of structs that define the traffic lights
  */
-static struct {Side side; Direction direction;} lights[9] =
+static struct {Side side; Direction direction; int m1; int m2; int m3; int m4;} lights[9] =
 {
-  {NORTH, RIGHT},
-  {NORTH, STRAIGHT},
-  {EAST, RIGHT},
-  {EAST, STRAIGHT},
-  {EAST, LEFT},
-  {SOUTH, STRAIGHT},
-  {SOUTH, LEFT},
-  {WEST, RIGHT},
-  {WEST, LEFT}
+  {NORTH, RIGHT, 1, 0, 0, 0},
+  {NORTH, STRAIGHT, 2, 8, 9, 0},
+  {EAST, RIGHT, 3, 0, 0, 0},
+  {EAST, STRAIGHT, 1, 2, 4, 0},
+  {EAST, LEFT, 5, 7, 9, 0},
+  {SOUTH, STRAIGHT, 3, 4, 5, 0},
+  {SOUTH, LEFT, 1, 2, 6, 7},
+  {WEST, RIGHT, 9, 0, 0, 0},
+  {WEST, LEFT, 3, 4, 6, 8}
 };
 
 /*
@@ -141,21 +150,25 @@ static bool all_cars_handled()
 /*
  * manage_light(void* arg)
  *
- * A function that implements the behaviour of a traffic light
- * As argument receives the index of the traffic light in the lights array
+ * Description:
+ * A function that implements the behavior of a traffic light.
+ * Receives the index of the traffic light in the lights array as an argument.
  * While not all arrivals have been handled, repeatedly:
- * - waits for an arrival using the semaphore for this traffic light
- * - locks the mutex(es)
- * - makes the traffic light turn green
- * - sleeps for CROSS_TIME seconds
- * - makes the traffic light turn red
- * - unlocks the mutex(es)
+ * - Waits for an arrival using the semaphore for this traffic light.
+ * - Locks the mutex(es) associated with the relevant intersection sections.
+ * - Checks if all relevant intersection sections are unlocked; if yes, makes the traffic light turn green.
+ * - Sleeps for CROSS_TIME seconds while the car passes.
+ * - Makes the traffic light turn red and unlocks the relevant intersection section mutexes.
  */
 static void* manage_light(void* arg)
 {
   int light_index = (int)arg;
   Side side = lights[light_index].side;
   Direction direction = lights[light_index].direction;
+  int m1 = lights[light_index].m1;
+  int m2 = lights[light_index].m2;
+  int m3 = lights[light_index].m3;
+  int m4 = lights[light_index].m4;
   fprintf(stderr, "(Light %d / %d):\t Started\n", side, direction);
 
   // keep track of how many cars have passed
@@ -169,31 +182,106 @@ static void* manage_light(void* arg)
 
     fprintf(stderr, "(Light %d / %d):\t Car %d arrived at light\n", side, direction, curr_arrivals[side][direction][cars_passed].id);
 
-    // lock the mutex(es)
-    pthread_mutex_lock(&mutexes[0]);
+    // lock the section change lock
+    pthread_mutex_lock(&mutex_lock);
 
-    // make the traffic light turn green
-    print_traffic_light_change(side, direction, true, get_time_passed(), curr_arrivals[side][direction][cars_passed].id);
-
-    fprintf(stderr, "(Light %d / %d):\t Car %d entering intersection\n", side, direction, curr_arrivals[side][direction][cars_passed].id);
-
-    // +1 car
-    cars_passed += 1;
-
-    // sleep for CROSS_TIME seconds while the car passes
-    sleep(CROSS_TIME);
-
-    // make the traffic light turn red
-    print_traffic_light_change(side, direction, false, get_time_passed(), 0); 
-
-    // unlock the mutex(es)
-    pthread_mutex_unlock(&mutexes[0]);
+    fprintf(stderr, "(Light %d / %d):\t Section change lock locked\n", side, direction);
     
-  }
+    // for each path_mutex check whether it is locked
+    bool all_unlocked = true;
+    if (m1 != 0)
+    {
+      if (pthread_mutex_trylock(&mutexes[m1]) != 0)
+      {
+        all_unlocked = false;
+      }
+    }
+    fprintf(stderr, "(Light %d / %d):\t 1/4 unlocked: %d\n", side, direction, all_unlocked);
+    if (m2 != 0)
+    {
+      if (pthread_mutex_trylock(&mutexes[m2]) != 0)
+      {
+        all_unlocked = false;
+      }
+    }
+    fprintf(stderr, "(Light %d / %d):\t 2/4 unlocked: %d\n", side, direction, all_unlocked);
+    if (m3 != 0)
+    {
+      if (pthread_mutex_trylock(&mutexes[m3]) != 0)
+      {
+        all_unlocked = false;
+      }
+    }
+    fprintf(stderr, "(Light %d / %d):\t 3/4 unlocked: %d\n", side, direction, all_unlocked);
+    if (m4 != 0)
+    {
+      if (pthread_mutex_trylock(&mutexes[m4]) != 0)
+      {
+        all_unlocked = false;
+      }
+    }
+    fprintf(stderr, "(Light %d / %d):\t 4/4 unlocked: %d\n", side, direction, all_unlocked);
 
+    // if all path_mutexes are unlocked, make the light green
+    if (all_unlocked)
+    {
+      // print the light change
+      print_traffic_light_change(side, direction, true, get_time_passed(), curr_arrivals[side][direction][cars_passed].id);
+
+      fprintf(stderr, "(Light %d / %d):\t Path mutexes locked\n", side, direction);
+
+      // unlock the section change lock
+      pthread_mutex_unlock(&mutex_lock);
+
+      fprintf(stderr, "(Light %d / %d):\t Section change lock unlocked\n", side, direction);
+
+      // sleep for CROSS_TIME seconds
+      sleep(CROSS_TIME);
+
+      fprintf(stderr, "(Light %d / %d):\t Car %d passed\n", side, direction, curr_arrivals[side][direction][cars_passed].id);
+
+      // print the light change
+      print_traffic_light_change(side, direction, false, get_time_passed(), 0);
+
+      // lock the section change lock
+      pthread_mutex_lock(&mutex_lock);
+
+      fprintf(stderr, "(Light %d / %d):\t Section change lock locked\n", side, direction);
+
+      // unlock the path_mutexes
+      if (m1 != 0)
+      {
+        pthread_mutex_unlock(&mutexes[m1]);
+      }
+      if (m2 != 0)
+      {
+        pthread_mutex_unlock(&mutexes[m2]);
+      }
+      if (m3 != 0)
+      {
+        pthread_mutex_unlock(&mutexes[m3]);
+      }
+      if (m4 != 0)
+      {
+        pthread_mutex_unlock(&mutexes[m4]);
+      }
+
+      fprintf(stderr, "(Light %d / %d):\t Path mutexes unlocked\n", side, direction);
+
+      // increment the number of cars passed
+      cars_passed += 1;
+    }
+    else
+    {
+      // increment the semaphore again so that the light can try again later when the section is unlocked
+      sem_post(&semaphores[side][direction]);
+    }
+
+    // unlock the section change lock
+    pthread_mutex_unlock(&mutex_lock);
+  }
   return(0);
 }
-
 
 int main(int argc, char * argv[])
 {
@@ -204,6 +292,11 @@ int main(int argc, char * argv[])
     {
       sem_init(&semaphores[i][j], 0, 0);
     }
+  }
+
+  // Initialize each mutex in the array
+  for (int i = 0; i < 8; ++i) {
+    pthread_mutex_init(&mutexes[i], NULL);
   }
 
   // create a thread per traffic light that executes manage_light
@@ -254,5 +347,9 @@ int main(int argc, char * argv[])
     {
       sem_destroy(&semaphores[i][j]);
     }
+  }
+  // destroy mutexes
+  for (int i = 0; i < 8; ++i) {
+    pthread_mutex_destroy(&mutexes[i]);
   }
 }
